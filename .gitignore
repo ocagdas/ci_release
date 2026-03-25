@@ -18,8 +18,7 @@ build/
 
 # Test and coverage output
 .coverage
-coverage.xml
-pytest-report.xml
+reports/
 htmlcov/
 
 # Packaging artifact produced by CI

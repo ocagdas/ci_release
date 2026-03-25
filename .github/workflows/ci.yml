@@ -11,43 +11,123 @@ on:
     branches:
       - main
 
+# ---------------------------------------------------------------------------
+# Registry configuration
+#
+# Defaults to GitHub Container Registry (ghcr.io) using the built-in
+# GITHUB_TOKEN. To target a different registry:
+#   1. Set the REGISTRY repository variable (e.g. docker.io).
+#   2. Set the IMAGE_NAME repository variable if the default repo path differs.
+#   3. Set REGISTRY_TOKEN as a repository secret for private registry auth.
+#      When REGISTRY_TOKEN is absent, GITHUB_TOKEN is used (GHCR only).
+#   4. Optionally set REGISTRY_USERNAME if the username differs from the
+#      GitHub actor (e.g. a service-account login for Docker Hub).
+# ---------------------------------------------------------------------------
+env:
+  REGISTRY: ${{ vars.REGISTRY || 'ghcr.io' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || github.repository }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write   # required to push/pull images from GHCR
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # Use docker manifest inspect (no layer download) to check whether a
+      # SHA-tagged production image was already pushed in an earlier run for
+      # this exact commit. Falls back to "not found" on any non-zero exit,
+      # including transient network failures, which is safe — we simply
+      # rebuild rather than silently reuse a stale image.
+      - name: Check whether production image exists for this commit
+        id: image-check
+        run: |
+          SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+          if docker manifest inspect "$SHA_TAG" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build the test image (base + dev deps + full source). Layer cache is
+      # stored in GitHub Actions cache to speed up subsequent runs.
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          load: true
+          tags: ci-test:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Run flake8
-        run: flake8 app/ tests/
+        run: docker compose run --rm --no-build lint
 
       - name: Run pytest
-        run: pytest
+        run: |
+          # Create the reports directory on the host before starting the
+          # container so that the bind-mount is user-owned. Docker would
+          # otherwise create it as root, causing permission errors when
+          # pytest tries to write the XML report files.
+          mkdir -p reports
+          docker compose run --rm --no-build test
 
       - name: Upload pytest report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-report
-          path: pytest-report.xml
+          path: reports/pytest-report.xml
 
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: coverage.xml
+          path: reports/coverage.xml
+
+      # Build and push the production image only when:
+      #   - this is a push event (not a pull-request, where write access may
+      #     be unavailable for fork PRs), and
+      #   - no image with this commit SHA exists yet in the registry.
+      - name: Build and push production image
+        if: >
+          github.event_name == 'push' &&
+          steps.image-check.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Create package artifact
         run: zip -r package.zip app/ requirements.txt
