@@ -7,21 +7,15 @@ services:
       - "8000:8000"
 
   # Runs flake8 inside the test image.
-  # Used by CI: docker compose run --rm --no-build lint
+  # Used by CI: docker compose run --rm lint
   lint:
     image: ${TEST_IMAGE:-ci-test:local}
-    build:
-      context: .
-      target: test
     command: flake8 app/ tests/
 
   # Runs pytest inside the test image and writes reports to ./reports/.
-  # Used by CI: docker compose run --rm --no-build test
+  # Used by CI: docker compose run --rm test
   test:
     image: ${TEST_IMAGE:-ci-test:local}
-    build:
-      context: .
-      target: test
     volumes:
       - ./reports:/app/reports
     command: pytest

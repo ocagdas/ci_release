@@ -86,7 +86,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run flake8
-        run: docker compose run --rm --no-build lint
+        run: docker compose run --rm lint
 
       - name: Run pytest
         run: |
@@ -95,7 +95,7 @@ jobs:
           # otherwise create it as root, causing permission errors when
           # pytest tries to write the XML report files.
           mkdir -p reports
-          docker compose run --rm --no-build test
+          docker compose run --rm test
 
       - name: Upload pytest report
         if: always()
